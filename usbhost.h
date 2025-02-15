@@ -34,6 +34,12 @@ e-mail   :  support@circuitsathome.com
 #include <sys/types.h>
 #endif
 
+#if MICROBLAZE
+#include <xspi.h>
+#include "xparameters.h"
+#include <xil_printf.h>
+#endif
+
 /* SPI initialization */
 template< typename SPI_CLK, typename SPI_MOSI, typename SPI_MISO, typename SPI_SS > class SPi {
 public:
@@ -74,6 +80,36 @@ public:
                 USB_SPI.setClockDivider(4); // Set speed to 84MHz/4=21MHz - the MAX3421E can handle up to 26MHz
 #endif
         }
+#elif defined(MICROBLAZE)
+        static void init(){ //copied from 
+                xil_printf("Initializing SPI\n");
+
+                ConfigPtr = XSpi_LookupConfig(XPAR_SPI_USB_DEVICE_ID);
+                if (ConfigPtr == NULL) {
+                        return XST_DEVICE_NOT_FOUND;
+                }
+
+                Status = XSpi_CfgInitialize(&SpiInstance, ConfigPtr,
+                                        ConfigPtr->BaseAddress);
+                if (Status != XST_SUCCESS) {
+                        return XST_FAILURE;
+                }
+
+                if (Status != XST_SUCCESS)
+                {
+                        xil_printf ("SPI device failed to initialize %d", Status);
+                }
+                Status = XSpi_SetOptions(&SpiInstance, XSP_MASTER_OPTION | XSP_MANUAL_SSELECT_OPTION);
+                if (Status != XST_SUCCESS)
+                {
+                        xil_printf ("SPI device failed to go into master mode %d", Status);
+                }
+
+                XSpi_Start(&SpiInstance);
+                XSpi_IntrGlobalDisable(&SpiInstance);
+        }
+
+
 #else
         static void init() {
                 //uint8_t tmp;
@@ -126,6 +162,8 @@ typedef SPi< P18, P23, P19, P5 > spi;
 typedef SPi< P26, P25, P24, P5 > spi;
 #elif defined(ARDUINO_Seeed_XIAO_nRF52840_Sense)
 typedef SPi< P8, P10, P9, P7 > spi;
+#elif defined(MICROBLAZE) //maybe useless
+typedef<P0, P0, P0, P0> spi //i think this is fine bc we never use it 
 #else
 #error "No SPI entry in usbhost.h"
 #endif
@@ -151,7 +189,7 @@ public:
         int8_t Init();
         int8_t Init(int mseconds);
 
-        void vbusPower(VBUS_t state) {
+        void vbusPower(VBUS_t state) { // this is different
                 regWr(rPINCTL, (bmFDUPSPI | bmINTLEVEL | state));
         }
 
@@ -205,6 +243,8 @@ void MAX3421e< SPI_SS, INTR >::regWr(uint8_t reg, uint8_t data) {
 #elif !defined(SPDR) // ESP8266, ESP32
         USB_SPI.transfer(reg | 0x02);
         USB_SPI.transfer(data);
+#elif defined(MICROBLAZE) 
+//TODO: fill in
 #else
         SPDR = (reg | 0x02);
         while(!(SPSR & (1 << SPIF)));
@@ -249,6 +289,8 @@ uint8_t* MAX3421e< SPI_SS, INTR >::bytesWr(uint8_t reg, uint8_t nbytes, uint8_t*
                 nbytes--;
                 data_p++; // advance data pointer
         }
+#elif defined(MICROBLAZE) 
+//TODO: fill in
 #else
         SPDR = (reg | 0x02); //set WR bit and send register number
         while(nbytes) {
@@ -301,6 +343,8 @@ uint8_t MAX3421e< SPI_SS, INTR >::regRd(uint8_t reg) {
         USB_SPI.transfer(reg);
         uint8_t rv = USB_SPI.transfer(0); // Send empty byte
         SPI_SS::Set();
+#elif defined(MICROBLAZE) 
+//TODO: fill in
 #else
         SPDR = reg;
         while(!(SPSR & (1 << SPIF)));
@@ -352,6 +396,8 @@ uint8_t* MAX3421e< SPI_SS, INTR >::bytesRd(uint8_t reg, uint8_t nbytes, uint8_t*
             *data_p++ = USB_SPI.transfer(0);
             nbytes--;
         }
+#elif defined(MICROBLAZE) 
+        //TODO: fill in
 #else
         SPDR = reg;
         while(!(SPSR & (1 << SPIF))); //wait
@@ -412,15 +458,44 @@ uint8_t MAX3421e< SPI_SS, INTR >::gpioRdOutput() {
   or zero if PLL haven't stabilized in 65535 cycles */
 template< typename SPI_SS, typename INTR >
 uint16_t MAX3421e< SPI_SS, INTR >::reset() {
-        uint16_t i = 0;
-        regWr(rUSBCTL, bmCHIPRES);
-        regWr(rUSBCTL, 0x00);
-        while(++i) {
-                if((regRd(rUSBIRQ) & bmOSCOKIRQ)) {
-                        break;
+        #ifndef(MICROBLAZE)
+                uint16_t i = 0;
+                regWr(rUSBCTL, bmCHIPRES);
+                regWr(rUSBCTL, 0x00);
+                while(++i) {
+                        if((regRd(rUSBIRQ) & bmOSCOKIRQ)) {
+                                break;
+                        }
                 }
-        }
-        return ( i);
+                return ( i);
+        #else 
+                static XGpio Gpio_rst;
+                Status = XGpio_Initialize(&Gpio_rst, XPAR_GPIO_USB_RST_DEVICE_ID);
+                XGpio_SetDataDirection(&Gpio_rst, 1, 0); //configure reset, and set reset to output
+                Status = XGpio_Initialize(&Gpio_int, XPAR_GPIO_USB_INT_DEVICE_ID);
+                XGpio_SetDataDirection(&Gpio_int, 1, ~1); //configure int, and set int to input
+
+                //TODO: maybe pass in SPI_RESET pin for SPI_SS, confusing but potentially cleaner code
+                //hardware reset, then software reset
+                XGpio_DiscreteClear(&Gpio_rst, 1, 0x1);
+                xil_printf ("Holding USB in Reset\n");
+                for (int delay = 0; delay < 0x7FFFF; delay ++){}
+                XGpio_DiscreteSet(&Gpio_rst, 1, 0x1);
+                xil_printf ("Revision is: %d, if this reads 0 check your MAXreg_rd \n", MAXreg_rd( rREVISION));
+                BYTE tmp = 0;
+
+                regWr( rUSBCTL, bmCHIPRES);      //Chip (soft) reset. This stops the oscillator
+                regWr( rUSBCTL, 0x00);           //Remove the reset
+
+                xil_printf("Waiting for PLL to stabilize: ");
+                while (!(regRd( rUSBIRQ) & bmOSCOKIRQ)) { //wait until the PLL stabilizes
+                        tmp++;                                      //timeout after 256 attempts
+                        xil_printf(".\n");
+                        if (tmp == 0) {
+                                xil_printf("reset timeout!, check your MAXreg_wr\n");
+                        }
+                }
+        #endif
 }
 
 /* initialize MAX3421E. Set Host mode, pullups, and stuff. Returns 0 if success, -1 if not */
@@ -431,6 +506,7 @@ int8_t MAX3421e< SPI_SS, INTR >::Init() {
         // you really should not init hardware in the constructor when it involves locks.
         // Also avoids the vbus flicker issue confusing some devices.
         /* pin and peripheral setup */
+        #ifdef
         SPI_SS::SetDirWrite();
         SPI_SS::Set();
         spi::init();
