@@ -34,7 +34,9 @@ e-mail   :  support@circuitsathome.com
 #include <sys/types.h>
 #endif
 
-#if MICROBLAZE
+#if __MICROBLAZE__
+XSpi SpiInstance;
+XGpio Gpio_Instance;
 #include <xspi.h>
 #include "xparameters.h"
 #include <xil_printf.h>
@@ -80,7 +82,7 @@ public:
                 USB_SPI.setClockDivider(4); // Set speed to 84MHz/4=21MHz - the MAX3421E can handle up to 26MHz
 #endif
         }
-#elif defined(MICROBLAZE)
+#elif defined(__MICROBLAZE__)
         static void init(){ //copied from 
                 xil_printf("Initializing SPI\n");
 
@@ -162,8 +164,8 @@ typedef SPi< P18, P23, P19, P5 > spi;
 typedef SPi< P26, P25, P24, P5 > spi;
 #elif defined(ARDUINO_Seeed_XIAO_nRF52840_Sense)
 typedef SPi< P8, P10, P9, P7 > spi;
-#elif defined(MICROBLAZE) //maybe useless
-typedef<P0, P0, P0, P0> spi //i think this is fine bc we never use it 
+#elif defined(__MICROBLAZE__) //maybe useless
+typedef<SCLK, MOSI, MISO, SS> spi //i think this is fine bc we never use it 
 #else
 #error "No SPI entry in usbhost.h"
 #endif
@@ -243,8 +245,15 @@ void MAX3421e< SPI_SS, INTR >::regWr(uint8_t reg, uint8_t data) {
 #elif !defined(SPDR) // ESP8266, ESP32
         USB_SPI.transfer(reg | 0x02);
         USB_SPI.transfer(data);
-#elif defined(MICROBLAZE) 
-//TODO: fill in
+#elif defined(__MICROBLAZE__) 
+        //TODO: fill in
+	//psuedocode:
+	//select MAX3421E 
+	//write reg + 2 via SPI
+	//write val via SPI
+	//read return code from SPI peripheral (see Xilinx examples) 
+	//if return code != 0 print an error
+	//deselect MAX3421E (may not be necessary if you are using SPI peripheral)
 #else
         SPDR = (reg | 0x02);
         while(!(SPSR & (1 << SPIF)));
@@ -289,8 +298,16 @@ uint8_t* MAX3421e< SPI_SS, INTR >::bytesWr(uint8_t reg, uint8_t nbytes, uint8_t*
                 nbytes--;
                 data_p++; // advance data pointer
         }
-#elif defined(MICROBLAZE) 
-//TODO: fill in
+#elif defined(__MICROBLAZE__) 
+        //TODO: fill in
+	//psuedocode:
+	//select MAX3421E (may not be necessary if you are using SPI peripheral)
+	//write reg + 2 via SPI
+	//write data[n] via SPI, where n goes from 0 to nbytes-1
+	//read return code from SPI peripheral 
+	//if return code != 0 print an error
+	//deselect MAX3421E (may not be necessary if you are using SPI peripheral)
+	//return (data + nbytes);
 #else
         SPDR = (reg | 0x02); //set WR bit and send register number
         while(nbytes) {
@@ -343,8 +360,16 @@ uint8_t MAX3421e< SPI_SS, INTR >::regRd(uint8_t reg) {
         USB_SPI.transfer(reg);
         uint8_t rv = USB_SPI.transfer(0); // Send empty byte
         SPI_SS::Set();
-#elif defined(MICROBLAZE) 
-//TODO: fill in
+#elif defined(__MICROBLAZE__) 
+        //TODO: fill in
+	//psuedocode:
+	//select MAX3421E (
+	//write reg via SPI
+	//read val via SPI
+	//read return code from SPI peripheral 
+	//if return code != 0 print an error
+	//deselect MAX3421E (may not be necessary if you are using SPI peripheral)
+	//return val
 #else
         SPDR = reg;
         while(!(SPSR & (1 << SPIF)));
@@ -396,8 +421,16 @@ uint8_t* MAX3421e< SPI_SS, INTR >::bytesRd(uint8_t reg, uint8_t nbytes, uint8_t*
             *data_p++ = USB_SPI.transfer(0);
             nbytes--;
         }
-#elif defined(MICROBLAZE) 
+#elif defined(__MICROBLAZE__) 
         //TODO: fill in
+        //psuedocode:
+	//select MAX3421E (may not be necessary if you are using SPI peripheral)
+	//write reg via SPI
+	//read data[n] from SPI, where n goes from 0 to nbytes-1
+	//read return code from SPI peripheral 
+	//if return code != 0 print an error
+	//deselect MAX3421E (may not be necessary if you are using SPI peripheral)
+	//return (data + nbytes);
 #else
         SPDR = reg;
         while(!(SPSR & (1 << SPIF))); //wait
@@ -458,7 +491,7 @@ uint8_t MAX3421e< SPI_SS, INTR >::gpioRdOutput() {
   or zero if PLL haven't stabilized in 65535 cycles */
 template< typename SPI_SS, typename INTR >
 uint16_t MAX3421e< SPI_SS, INTR >::reset() {
-        #ifndef(MICROBLAZE)
+        #ifndef(__MICROBLAZE__)
                 uint16_t i = 0;
                 regWr(rUSBCTL, bmCHIPRES);
                 regWr(rUSBCTL, 0x00);
@@ -472,10 +505,8 @@ uint16_t MAX3421e< SPI_SS, INTR >::reset() {
                 static XGpio Gpio_rst;
                 Status = XGpio_Initialize(&Gpio_rst, XPAR_GPIO_USB_RST_DEVICE_ID);
                 XGpio_SetDataDirection(&Gpio_rst, 1, 0); //configure reset, and set reset to output
-                Status = XGpio_Initialize(&Gpio_int, XPAR_GPIO_USB_INT_DEVICE_ID);
-                XGpio_SetDataDirection(&Gpio_int, 1, ~1); //configure int, and set int to input
+                INTR::SetDirRead();
 
-                //TODO: maybe pass in SPI_RESET pin for SPI_SS, confusing but potentially cleaner code
                 //hardware reset, then software reset
                 XGpio_DiscreteClear(&Gpio_rst, 1, 0x1);
                 xil_printf ("Holding USB in Reset\n");
@@ -500,7 +531,7 @@ uint16_t MAX3421e< SPI_SS, INTR >::reset() {
 
 /* initialize MAX3421E. Set Host mode, pullups, and stuff. Returns 0 if success, -1 if not */
 template< typename SPI_SS, typename INTR >
-int8_t MAX3421e< SPI_SS, INTR >::Init() {
+int8_t MAX3421e< SPI_SS, INTR >::Init() { //TODO: ASK IF this is essentially the same, i think the vbus is done in busprobe
         XMEM_ACQUIRE_SPI();
         // Moved here.
         // you really should not init hardware in the constructor when it involves locks.
@@ -647,6 +678,16 @@ uint8_t MAX3421e< SPI_SS, INTR >::IntHandler() {
                 busprobe();
                 HIRQ_sendback |= bmCONDETIRQ;
         }
+        #if __MICROBLAZE__
+        if (HIRQ & bmSNDBAVIRQ) //if the send buffer is clear (previous transfer completed without issue)
+	{
+		MAXreg_wr(rSNDBC, 0x00);//clear the send buffer (not really necessary, but clears interrupt)
+	}
+	if (HIRQ & bmBUSEVENTIRQ) {           //bus event is either reset or suspend
+		usb_task_state++;                       //advance USB task state machine
+		HIRQ_sendback |= bmBUSEVENTIRQ;
+	}
+        #endif
         /* End HIRQ interrupts handling, clear serviced IRQs    */
         regWr(rHIRQ, HIRQ_sendback);
         return ( HIRQ_sendback);

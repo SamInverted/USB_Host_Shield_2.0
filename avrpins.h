@@ -1950,46 +1950,61 @@ MAKE_PIN(P17, 17); // INT
 #endif
 #define pgm_read_pointer(p) pgm_read_ptr(p)
 
-#elif defined(MICROBLAZE)
+#elif defined(__MICROBLAZE__)
 #include <xgpio.h>
+#include <xspi.h>
 #include "xparameters.h"
-//TODO: ask about pins, 
+extern XSpi SpiInstance;
+extern XGpio Gpio_Instance;
+
 #define MAKE_PIN(className, device_id, pin) \
 class className { \
 public: \
   static void Set() { \
-    static XGpio Gpio_Instance; \
-    XGpio_Initialize(&Gpio_Instance, device_id); \
-    XGpio_DiscreteSet(&Gpio_Instance, 1, 0x1); \
+    /*checking if SS */ \
+    if(pin == 0) { \
+      XSpi_SetSlaveSelect(&SpiInstance, 0x00); \
+    } \
   } \
   static void Clear() { \
-    static XGpio Gpio_Instance; \
-    XGpio_Initialize(&Gpio_Instance, device_id); \
-    XGpio_DiscreteClear(&Gpio_Instance, 1, 0x1); \
+    /*checking if SS */ \
+    if(pin == 0) { \
+      XSpi_SetSlaveSelect(&SpiInstance, 0x01); \
+    } \
   } \
   static void SetDirRead() { \
-    static XGpio Gpio_Instance; \
-    XGpio_Initialize(&Gpio_Instance, device_id); \
-    uint32_t mask = XGpio_GetDataDirection(&Gpio_Instance, 1); \
-    mask |= (1 << pin); \
-    XGpio_SetDataDirection(&Gpio_Instance, 1, mask); \
+    /*checking if INTR */ \
+    if(pin == 1){ \
+      XGpio_Initialize(&Gpio_Instance, device_id); \
+      uint32_t mask = XGpio_GetDataDirection(&Gpio_Instance, 1); \
+      mask |= (1 << 0); \
+      XGpio_SetDataDirection(&Gpio_Instance, 1, mask); \
+    } \
   } \
   static void SetDirWrite() { \
-    static XGpio Gpio_Instance; \
-    XGpio_Initialize(&Gpio_Instance, device_id); \
-    uint32_t mask = XGpio_GetDataDirection(&Gpio_Instance, 1); \
-    mask &= ~(1 << pin); \
-    XGpio_SetDataDirection(&Gpio_Instance, 1, mask); \
+    /*checking if INTR, shouldnt actually be called */ \
+    if(pin == 1){ \
+      XGpio_Initialize(&Gpio_Instance, device_id); \
+      uint32_t mask = XGpio_GetDataDirection(&Gpio_Instance, 1); \
+      mask &= ~(1 << 0); \
+      XGpio_SetDataDirection(&Gpio_Instance, 1, mask); \
+    } \
   } \
   static uint32_t IsSet() { \
-    static XGpio Gpio_Instance; \
-    XGpio_Initialize(&Gpio_Instance, device_id); \
-    return (XGpio_DiscreteRead(&Gpio_Instance, 1) >> pin)&1; \
+    /*checking if INTR */ \
+    if(pin == 1){ \
+      XGpio_Initialize(&Gpio_Instance, device_id); \
+      return XGpio_DiscreteRead(&Gpio_Instance, 1)&1; \
+    } \
   } \
 };
 
-MAKE_PIN(P1, XPAR_GPIO_USB_INT_DEVICE_ID, 0); // T13
-MAKE_PIN(P0, XPAR_GPIO_USB_RST_DEVICE_ID, 0); // V13
+MAKE_PIN(MISO, XPAR_GPIO_USB_INT_DEVICE_ID, 0); //MISO, useless
+MAKE_PIN(MOSI, XPAR_GPIO_USB_RST_DEVICE_ID, 0); //MOSI, ueless
+MAKE_PIN(SCLK, XPAR_GPIO_USB_INT_DEVICE_ID, 0); //CLK, uesless
+MAKE_PIN(SS, XPAR_GPIO_USB_RST_DEVICE_ID, 0); //SS
+MAKE_PIN(INTR, XPAR_GPIO_USB_INT_DEVICE_ID, 1); //INTR
+//TODO: NOT SURE ABOUT NESTING OF IFDEFS
 
 #undef MAKE_PIN
 
