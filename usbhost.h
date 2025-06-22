@@ -37,9 +37,14 @@ e-mail   :  support@circuitsathome.com
 #if __MICROBLAZE__
 XSpi SpiInstance;
 XGpio Gpio_Instance;
-#include <xspi.h>
 #include "xparameters.h"
-#include <xil_printf.h>
+#include <unistd.h>
+#include <xspi.h>
+#include <xgpio.h>
+#include <xtmrctr.h>
+#include "xintc.h"
+#include "sleep.h"
+
 #endif
 
 /* SPI initialization */
@@ -86,7 +91,7 @@ public:
         static void init(){ //copied from 
                 xil_printf("Initializing SPI\n");
 
-                ConfigPtr = XSpi_LookupConfig(XPAR_SPI_USB_DEVICE_ID);
+                static XSpi_Config *ConfigPtr = XSpi_LookupConfig(XPAR_SPI_USB_DEVICE_ID);
                 if (ConfigPtr == NULL) {
                         return XST_DEVICE_NOT_FOUND;
                 }
@@ -191,8 +196,21 @@ public:
         int8_t Init();
         int8_t Init(int mseconds);
 
-        void vbusPower(VBUS_t state) { // this is different
-                regWr(rPINCTL, (bmFDUPSPI | bmINTLEVEL | state));
+        void vbusPower(VBUS_t state) { // this is different TODO: ALTER THIS CODE IMPORTANT
+                #ifdef (__MICROBLAZE__)
+                        uint8_t tmp = regRd( rIOPINS1 );       //copy of IOPINS2
+                        if( state == 0) {    //turn on by setting GPOUT0, in host code vbus_on == 0
+                                tmp |= bmGPOUT0;
+                        }
+                        else {                                      //turn off by clearing GPOUT0
+                                tmp &= ~bmGPOUT0;
+                        }
+                        regWr( rIOPINS1,tmp );                              //send GPOUT0
+                        for (int delay = 0; delay < 0xFFFFF; delay ++){}		//delay a couple MS
+                        xil_printf ("VBUS power state change \n");
+                #else
+                        regWr(rPINCTL, (bmFDUPSPI | bmINTLEVEL | state));
+                #endif
         }
 
         uint8_t getVbusState(void) {
@@ -254,6 +272,14 @@ void MAX3421e< SPI_SS, INTR >::regWr(uint8_t reg, uint8_t data) {
 	//read return code from SPI peripheral (see Xilinx examples) 
 	//if return code != 0 print an error
 	//deselect MAX3421E (may not be necessary if you are using SPI peripheral)
+        uint8_t spi_bytes[2];
+        spi_bytes[0] = reg + 2;
+        spi_bytes[1] = val;
+        int status = XSpi_Transfer(SpiInstance, spi_bytes, NULL, 2);
+        if (status != XST_SUCCESS) {
+            printf("Error during SPI transfer, regWr\n");
+            return status;
+        }
 #else
         SPDR = (reg | 0x02);
         while(!(SPSR & (1 << SPIF)));
@@ -308,6 +334,18 @@ uint8_t* MAX3421e< SPI_SS, INTR >::bytesWr(uint8_t reg, uint8_t nbytes, uint8_t*
 	//if return code != 0 print an error
 	//deselect MAX3421E (may not be necessary if you are using SPI peripheral)
 	//return (data + nbytes);
+        uint8_t spi_bytes[nbytes+1];
+        spi_bytes[0] = reg + 2;
+        for(int i = 0; i < nbytes; i++){
+                spi_bytes[i+1] = data_p[i];
+        }
+        
+        int status = XSpi_Transfer(SpiInstance, spi_bytes, NULL, nbytes+1);
+        if (status != XST_SUCCESS) {
+            printf("Error during SPI transfer, bytesWr\n");
+            return status;
+        }
+        return (data_p+nbytes);
 #else
         SPDR = (reg | 0x02); //set WR bit and send register number
         while(nbytes) {
@@ -370,6 +408,18 @@ uint8_t MAX3421e< SPI_SS, INTR >::regRd(uint8_t reg) {
 	//if return code != 0 print an error
 	//deselect MAX3421E (may not be necessary if you are using SPI peripheral)
 	//return val
+        uint8_t spi_bytes[2];
+        uint8_t val[2];
+        spi_bytes[0] = reg;
+        int status = XSpi_Transfer(SpiInstance, spi_bytes, val, 2);
+        if (status != XST_SUCCESS) {
+            printf("Error during SPI transfer, regRd\n");
+            return status;
+        }
+
+        SPI_SS::Set();
+        return val[1];
+        
 #else
         SPDR = reg;
         while(!(SPSR & (1 << SPIF)));
@@ -431,6 +481,21 @@ uint8_t* MAX3421e< SPI_SS, INTR >::bytesRd(uint8_t reg, uint8_t nbytes, uint8_t*
 	//if return code != 0 print an error
 	//deselect MAX3421E (may not be necessary if you are using SPI peripheral)
 	//return (data + nbytes);
+        uint8_t spi_bytes[nbytes+1];
+        uint8_t val[nbytes+1];
+        spi_bytes[0] = reg;
+        int status = XSpi_Transfer(SpiInstance, spi_bytes, val, nbytes+1);
+        if (status != XST_SUCCESS) {
+            printf("Error during SPI transfer, regRd\n");
+            return status;
+        }
+
+        for(int i = 0; i < nbytes; i++)
+        {
+                data_p[i] = val[i+1];
+        }
+        SPI_SS::Set();
+        return (data_p+nbytes);
 #else
         SPDR = reg;
         while(!(SPSR & (1 << SPIF))); //wait
@@ -537,7 +602,6 @@ int8_t MAX3421e< SPI_SS, INTR >::Init() { //TODO: ASK IF this is essentially the
         // you really should not init hardware in the constructor when it involves locks.
         // Also avoids the vbus flicker issue confusing some devices.
         /* pin and peripheral setup */
-        #ifdef
         SPI_SS::SetDirWrite();
         SPI_SS::Set();
         spi::init();
@@ -589,12 +653,42 @@ int8_t MAX3421e< SPI_SS, INTR >::Init(int mseconds) {
 
         // Delay a minimum of 1 second to ensure any capacitors are drained.
         // 1 second is required to make sure we do not smoke a Microdrive!
-        if(mseconds < 1000) mseconds = 1000;
-        delay(mseconds);
+        #ifdef (__MICROBLAZE__)
+                XTmrCtr Usb_timer;
+                        //start USB timer
+                int Status = XTmrCtr_Initialize(&Usb_timer, XPAR_TIMER_USB_AXI_DEVICE_ID);
+                if (Status != XST_SUCCESS) {
+                                xil_printf ("Timer instantiation failed\n");
+                }
+                XTmrCtr_Start(&Usb_timer, 0);
 
-        regWr(rMODE, bmDPPULLDN | bmDMPULLDN | bmHOST); // set pull-downs, Host
+                xil_printf ("The following should be about 1 second ticks. If they are not, check your timer \n");
+                //Test timer to make sure it is plausible
+                for (int i = 0; i < 3; i++)
+                {
+                        u32 current = XTmrCtr_GetValue(&Usb_timer, 0);
+                        while (XTmrCtr_GetValue(&Usb_timer, 0) - current < 100000000)
+                        {
 
-        regWr(rHIEN, bmCONDETIE | bmFRAMEIE); //connection detection
+                        }
+                        xil_printf (".tick.\n");
+                }
+                vbusPower(vbus_off);
+                vbusPower(vbus_on);
+
+                regWr( rMODE, bmDPPULLDN | bmDMPULLDN | bmHOST | bmSEPIRQ); // set pull-downs, SOF, Host, Separate GPIN IRQ on GPX
+                //MAXreg_wr( rHIEN, bmFRAMEIE|bmCONDETIE|bmBUSEVENTIE );                      // enable SOF, connection detection, bus event IRQs
+                regWr( rHIEN, bmCONDETIE);   
+        #else
+                if(mseconds < 1000) mseconds = 1000;
+                delay(mseconds);
+
+                regWr(rMODE, bmDPPULLDN | bmDMPULLDN | bmHOST); // set pull-downs, Host
+
+                regWr(rHIEN, bmCONDETIE | bmFRAMEIE); //connection detection
+        #endif
+
+
 
         /* check if device is connected */
         regWr(rHCTL, bmSAMPLEBUS); // sample USB bus
@@ -605,8 +699,10 @@ int8_t MAX3421e< SPI_SS, INTR >::Init(int mseconds) {
         regWr(rHIRQ, bmCONDETIRQ); //clear connection detect interrupt
         regWr(rCPUCTL, 0x01); //enable interrupt pin
 
-        // GPX pin on. This is done here so that busprobe will fail if we have a switch connected.
-        regWr(rPINCTL, (bmFDUPSPI | bmINTLEVEL));
+        #ifndef (__MICROBLAZE__)
+                // GPX pin on. This is done here so that busprobe will fail if we have a switch connected.
+                regWr(rPINCTL, (bmFDUPSPI | bmINTLEVEL));
+        #endif
 
         return ( 0);
 }
@@ -617,6 +713,46 @@ void MAX3421e< SPI_SS, INTR >::busprobe() {
         uint8_t bus_sample;
         bus_sample = regRd(rHRSL); //Get J,K status
         bus_sample &= (bmJSTATUS | bmKSTATUS); //zero the rest of the byte
+        #if defined(__MICROBLAZE__)
+        switch (bus_sample) {                   //start full-speed or low-speed host
+                case ( bmJSTATUS):
+                        /*kludgy*/
+                        if (usb_task_state != USB_ATTACHED_SUBSTATE_WAIT_RESET_COMPLETE) { //bus reset causes connection detect interrupt
+                                if (!(regRd( rMODE) & bmLOWSPEED)) {
+                                        regWr( rMODE, MODE_FS_HOST);         //start full-speed host
+                                        xil_printf("Starting in full speed\n");
+                                } else {
+                                        regWr( rMODE, MODE_LS_HOST);    //start low-speed host
+                                        xil_printf("Starting in low speed\n");
+                                }
+                                usb_task_state = ( USB_STATE_ATTACHED); //signal usb state machine to start attachment sequence TODO: there is no USB_STATE_ATTACHED equivalent
+                        }
+                        break;
+                case ( bmKSTATUS):
+                        if (usb_task_state != USB_ATTACHED_SUBSTATE_WAIT_RESET_COMPLETE) { //bus reset causes connection detect interrupt
+                                if (!(regRd( rMODE) & bmLOWSPEED)) {
+                                        regWr( rMODE, MODE_LS_HOST);   //start low-speed host
+                                        xil_printf("Starting in low speed\n");
+                                } else {
+                                        regWr( rMODE, MODE_FS_HOST);         //start full-speed host
+                                        xil_printf("Starting in full speed\n");
+                                }
+                                usb_task_state = ( USB_STATE_ATTACHED); //signal usb state machine to start attachment sequence
+                        }
+                        break;
+                case ( bmSE1):              //illegal state
+                        usb_task_state = ( USB_DETACHED_SUBSTATE_ILLEGAL);
+                        break;
+                case ( bmSE0):              //disconnected state
+                        if (!((usb_task_state & USB_STATE_MASK) == USB_STATE_DETACHED)) //if we came here from other than detached state
+                                usb_task_state = ( USB_DETACHED_SUBSTATE_INITIALIZE); //clear device data structures
+                        else {
+                                regWr( rMODE, MODE_FS_HOST); //start full-speed host
+                                usb_task_state = ( USB_DETACHED_SUBSTATE_WAIT_FOR_DEVICE);
+                        }
+                        break;
+                } //end switch( bus_sample )
+        #else
         switch(bus_sample) { //start full-speed or low-speed host
                 case( bmJSTATUS):
                         if((regRd(rMODE) & bmLOWSPEED) == 0) {
@@ -679,14 +815,14 @@ uint8_t MAX3421e< SPI_SS, INTR >::IntHandler() {
                 HIRQ_sendback |= bmCONDETIRQ;
         }
         #if __MICROBLAZE__
-        if (HIRQ & bmSNDBAVIRQ) //if the send buffer is clear (previous transfer completed without issue)
-	{
-		MAXreg_wr(rSNDBC, 0x00);//clear the send buffer (not really necessary, but clears interrupt)
-	}
-	if (HIRQ & bmBUSEVENTIRQ) {           //bus event is either reset or suspend
-		usb_task_state++;                       //advance USB task state machine
-		HIRQ_sendback |= bmBUSEVENTIRQ;
-	}
+                if (HIRQ & bmSNDBAVIRQ) //if the send buffer is clear (previous transfer completed without issue)
+                {
+                        regWr(rSNDBC, 0x00);//clear the send buffer (not really necessary, but clears interrupt)
+                }
+                if (HIRQ & bmBUSEVENTIRQ) {           //bus event is either reset or suspend
+                        usb_task_state++;                       //advance USB task state machine
+                        HIRQ_sendback |= bmBUSEVENTIRQ;
+                }
         #endif
         /* End HIRQ interrupts handling, clear serviced IRQs    */
         regWr(rHIRQ, HIRQ_sendback);
